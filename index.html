@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+<title>Chapter 2</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff;font-family:system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif}
+  canvas{position:fixed;inset:0;width:100vw;height:100svh;display:block;background:#fff}
+  /* Replay only at end */
+  .replay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;opacity:0;transition:220ms ease}
+  .replay.show{opacity:1;pointer-events:auto}
+  .replay .btn{
+    appearance:none;border:1px solid rgba(0,0,0,.18);
+    background:rgba(255,255,255,.92);color:#111;
+    padding:14px 18px;border-radius:16px;font-weight:1000;font-size:16px;
+    box-shadow:0 18px 70px rgba(0,0,0,.20);cursor:pointer
+  }
+  .replay .btn:active{transform:scale(.99)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="replay" id="replayWrap" aria-hidden="true">
+  <button class="btn" id="btnReplay">🔁 إعادة</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const replayWrap = document.getElementById('replayWrap');
+  const btnReplay = document.getElementById('btnReplay');
+
+  // Faces
+  const imgMohsen = new Image(); imgMohsen.src = "Mohsen.png";
+  const imgWateen = new Image(); imgWateen.src = "wateen.png";
+
+  // ---------- SFX (optional) ----------
+  const sounds = {};
+  const sfxList = {
+    wind:"wind.mp3", notif:"notif.mp3", whoosh:"whoosh.mp3", pop:"pop.mp3",
+    chime:"chime.mp3", ring:"ring.mp3", drop:"drop.mp3", sparkle:"sparkle.mp3",
+    crowd:"crowd.mp3", airport:"airport.mp3", cinema:"cinema.mp3",
+  };
+  let audioUnlocked = false;
+
+  function loadSfx(){
+    for(const [k,src] of Object.entries(sfxList)){
+      const a = new Audio(src);
+      a.preload = "auto";
+      sounds[k] = a;
+    }
+  }
+  function unlockAudio(){
+    if(audioUnlocked) return;
+    audioUnlocked = true;
+    // try a silent-ish play to unlock on iOS (may fail harmlessly)
+    const a = sounds.chime || null;
+    if(a){
+      try{ a.volume = 0; a.currentTime = 0; a.play().then(()=>{a.pause(); a.volume = 1;}).catch(()=>{a.volume=1;}); }catch(e){}
+    }
+  }
+  function sfx(name){
+    const a = sounds[name];
+    if(!a) return;
+    try{
+      a.currentTime = 0;
+      a.play();
+    }catch(e){}
+  }
+  loadSfx();
+  window.addEventListener("pointerdown", unlockAudio, {once:true});
+
+  // ---------- Math helpers ----------
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  const easeOutCubic = (t)=>1-Math.pow(1-t,3);
+  const easeInOut = (t)=> t<.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+
+  // ---------- Resize ----------
+  function resize(){
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width  = Math.floor(window.innerWidth  * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Drawing primitives ----------
+  function clear(){
+    ctx.fillStyle="#fff";
+    ctx.fillRect(0,0,window.innerWidth, window.innerHeight);
+  }
+  function drawFloor(){
+    const y = window.innerHeight * 0.86;
+    ctx.strokeStyle="rgba(0,0,0,.14)";
+    ctx.lineWidth=6; ctx.lineCap="round";
+    ctx.beginPath();
+    ctx.moveTo(40,y); ctx.lineTo(window.innerWidth-40,y);
+    ctx.stroke();
+  }
+  function roundRect(x,y,w,h,r, fill, stroke){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rr);
+    ctx.arcTo(x+w,y+h,x,y+h,rr);
+    ctx.arcTo(x,y+h,x,y,rr);
+    ctx.arcTo(x,y,x+w,y,rr);
+    ctx.closePath();
+    if(fill) ctx.fill();
+    if(stroke) ctx.stroke();
+  }
+  function wrapText(text, maxWidth){
+    const words = text.split(" ");
+    const lines = [];
+    let line="";
+    for(const w of words){
+      const test = line ? (line+" "+w) : w;
+      if(ctx.measureText(test).width > maxWidth && line){
+        lines.push(line); line = w;
+      }else line = test;
+    }
+    if(line) lines.push(line);
+    return lines;
+  }
+  function drawSpeech(text, x, y, w, h, tailX, tailY){
+    ctx.fillStyle="rgba(255,255,255,.97)";
+    ctx.strokeStyle="rgba(0,0,0,.22)";
+    ctx.lineWidth=5;
+    roundRect(x,y,w,h,18,true,true);
+
+    ctx.beginPath();
+    ctx.moveTo(tailX, tailY);
+    ctx.lineTo(x + w*0.22, y + h);
+    ctx.lineTo(x + w*0.36, y + h);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle="#111";
+    ctx.textAlign="right";
+    ctx.textBaseline="top";
+    ctx.font="1000 30px system-ui,-apple-system,Segoe UI,Tahoma,Arial";
+
+    const pad=18;
+    const lines = wrapText(text, w - pad*2);
+    let ty = y + 14;
+    for(const ln of lines){
+      ctx.fillText(ln, x + w - pad, ty);
+      ty += 40;
+      if(ty > y + h - 42) break;
+    }
+  }
+
+  function drawRain(t){
+    ctx.strokeStyle="rgba(0,0,0,.14)";
+    ctx.lineWidth=3;
+    for(let i=0;i<42;i++){
+      const x = (i*(window.innerWidth/42)) + ((t*240)%18);
+      const y = ((t*420)%window.innerHeight) - i*13;
+      ctx.beginPath();
+      ctx.moveTo(x,y);
+      ctx.lineTo(x-10,y+28);
+      ctx.stroke();
+    }
+  }
+
+  function drawSparkles(cx, cy, t, count=7){
+    ctx.fillStyle="#111";
+    for(let i=0;i<count;i++){
+      const a = t*7 + i;
+      const sx = cx + Math.cos(a)*42;
+      const sy = cy + Math.sin(a)*30;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 6, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function drawPhone(x, y, w, h, faceImg, pop=1){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.scale(pop,pop);
+
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=8;
+    ctx.lineJoin="round";
+    ctx.fillStyle="rgba(255,255,255,.98)";
+    roundRect(0,0,w,h,26,true,true);
+
+    ctx.fillStyle="rgba(0,0,0,.06)";
+    roundRect(12,14,w-24,h-34,18,true,false);
+
+    ctx.fillStyle="#111";
+    ctx.beginPath();
+    ctx.arc(w*0.50, 20, 4, 0, Math.PI*2);
+    ctx.fill();
+
+    if(faceImg && faceImg.complete){
+      ctx.save();
+      ctx.beginPath();
+      roundRect(14,18,w-28,h-42,16,false,false);
+      ctx.clip();
+      ctx.drawImage(faceImg, 10, 6, w-20, h-12);
+      ctx.restore();
+    }
+
+    // message badge
+    ctx.fillStyle="#111";
+    ctx.beginPath();
+    ctx.arc(w-22, 28, 14, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle="#fff";
+    ctx.font="1000 18px system-ui,-apple-system,Segoe UI,Tahoma,Arial";
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText("1", w-22, 28);
+
+    ctx.restore();
+  }
+
+  function drawWorkshopIcon(x, y, t){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=8;
+    ctx.lineCap="round";
+    ctx.lineJoin="round";
+
+    // car
+    ctx.beginPath();
+    ctx.moveTo(-110, 20);
+    ctx.lineTo(-70, -20);
+    ctx.lineTo(40, -20);
+    ctx.lineTo(80, 10);
+    ctx.lineTo(110, 10);
+    ctx.lineTo(110, 40);
+    ctx.lineTo(-110, 40);
+    ctx.closePath();
+    ctx.stroke();
+
+    // wheels
+    ctx.beginPath(); ctx.arc(-60, 44, 18, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(70, 44, 18, 0, Math.PI*2); ctx.stroke();
+
+    // wrench wiggle
+    const wig = Math.sin(t*10)*0.12;
+    ctx.rotate(wig);
+    ctx.beginPath();
+    ctx.moveTo(-10, -70);
+    ctx.lineTo(60, -120);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(60, -120);
+    ctx.lineTo(80, -130);
+    ctx.lineTo(90, -110);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawCinemaIcon(x,y,t){
+    // simple film strip
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=8;
+    ctx.lineJoin="round";
+    ctx.lineCap="round";
+
+    const w=240, h=120;
+    ctx.beginPath();
+    ctx.rect(-w/2,-h/2,w,h);
+    ctx.stroke();
+
+    for(let i=0;i<6;i++){
+      const px = -w/2 + 18 + i*(w-36)/5;
+      ctx.beginPath(); ctx.arc(px, -h/2 + 18, 6, 0, Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(px,  h/2 - 18, 6, 0, Math.PI*2); ctx.stroke();
+    }
+
+    // play triangle pulsing
+    const p = 0.85 + 0.15*Math.sin(t*6);
+    ctx.save();
+    ctx.scale(p,p);
+    ctx.beginPath();
+    ctx.moveTo(-18,-28);
+    ctx.lineTo(38,0);
+    ctx.lineTo(-18,28);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  function drawMask(x,y,scale,openT){
+    // openT: 0 masked, 1 revealed
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.scale(scale,scale);
+
+    // mask outline
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=8;
+    ctx.lineJoin="round";
+    ctx.lineCap="round";
+
+    const off = lerp(0, 180, openT); // slide away
+    ctx.translate(off, 0);
+
+    ctx.beginPath();
+    ctx.arc(0,0,60,0,Math.PI*2);
+    ctx.stroke();
+
+    // eye slits
+    ctx.beginPath(); ctx.moveTo(-30,-10); ctx.lineTo(-10,-10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 10,-10); ctx.lineTo( 30,-10); ctx.stroke();
+
+    // mouth
+    ctx.beginPath(); ctx.moveTo(-18,24); ctx.lineTo(18,24); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawStamp(text, x, y, w){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(-0.06);
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=8;
+    roundRect(-w/2,-52,w,104,18,false,true);
+    ctx.font="1000 42px system-ui,-apple-system,Segoe UI,Tahoma,Arial";
+    ctx.fillStyle="#111";
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+
+  function drawStickman(p){
+    const s = p.scale;
+    const x = p.x, y = p.y;
+
+    ctx.strokeStyle="#111";
+    ctx.lineWidth=10*s;
+    ctx.lineCap="round";
+    ctx.lineJoin="round";
+
+    const headR = 56*s;
+    const headCx = x;
+    const headCy = y - 190*s;
+
+    // head
+    ctx.beginPath();
+    ctx.arc(headCx, headCy, headR, 0, Math.PI*2);
+    ctx.stroke();
+
+    // face inside
+    if(p.faceImg && p.faceImg.complete){
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(headCx, headCy, headR-6*s, 0, Math.PI*2);
+      ctx.clip();
+
+      const iw = headR*2.2, ih = headR*2.2;
+      ctx.translate(headCx, headCy);
+      ctx.rotate(p.faceTilt || 0);
+      ctx.drawImage(p.faceImg, -iw/2, -ih/2, iw, ih);
+      ctx.restore();
+
+      ctx.beginPath();
+      ctx.arc(headCx, headCy, headR, 0, Math.PI*2);
+      ctx.stroke();
+    }
+
+    // torso
+    const neckY = headCy + headR;
+    const torsoTop = neckY + 10*s;
+    const torsoBot = y - 30*s;
+
+    ctx.beginPath();
+    ctx.moveTo(x, torsoTop);
+    ctx.lineTo(x, torsoBot);
+    ctx.stroke();
+
+    // arms (poses)
+    const shoulderY = torsoTop + 40*s;
+    const armLen = 120*s;
+
+    if(p.armPose === 1){
+      // "stop / block" pose
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x + 90*s, shoulderY - 10*s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x - 90*s, shoulderY + 20*s); ctx.stroke();
+    } else if(p.armPose === 2){
+      // hug-ish / close
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x + 45*s, shoulderY + 65*s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x - 45*s, shoulderY + 65*s); ctx.stroke();
+    } else {
+      // normal
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x + 70*s, shoulderY + armLen); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, shoulderY);
+      ctx.lineTo(x - 70*s, shoulderY + armLen); ctx.stroke();
+    }
+
+    // legs
+    const hipY = torsoBot;
+    const legLen = 160*s;
+    const phase = p.legPhase || 0;
+    const a = Math.sin(phase) * 52*s;
+
+    ctx.beginPath(); ctx.moveTo(x, hipY);
+    ctx.lineTo(x + a, hipY + legLen); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, hipY);
+    ctx.lineTo(x - a, hipY + legLen); ctx.stroke();
+
+    // feet
+    ctx.lineWidth=12*s;
+    ctx.beginPath(); ctx.moveTo(x + a, hipY + legLen);
+    ctx.lineTo(x + a + 55*s, hipY + legLen); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - a, hipY + legLen);
+    ctx.lineTo(x - a + 55*s, hipY + legLen); ctx.stroke();
+  }
+
+  // ---------- Layout ----------
+  function layout(){
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const floorY = H * 0.86;
+
+    const baseY = floorY + 70;
+
+    // A “neutral” center positions
+    const leftX  = W*0.38;
+    const rightX = W*0.70;
+
+    return {W,H,floorY,baseY,leftX,rightX};
+  }
+
+  // ---------- Transitions ----------
+  function flash(alpha){
+    // white flash overlay
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.fillRect(0,0,window.innerWidth, window.innerHeight);
+  }
+
+  // ---------- Story (Chapter 2 - 2023) ----------
+  // Each segment: dur seconds, cue sound on entry, act(localT, L)
+  const story = [
+    // 0) 2023 - Mohsen alone (sad)
+    { dur: 3.2, cue:"wind", act:(t,L)=>{
+      const mx = L.W*0.52;
+      drawRain(t);
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, faceTilt:0.03});
+      if(t>0.12){
+        drawSpeech("عام 2023…\nمحسن وحيدًا بعد أن رحلت وتين…", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(170,L.H*0.18), mx, L.H*0.64);
+      }
+    }},
+
+    // 1) Unknown appears (mysterious)
+    { dur: 3.0, cue:"whoosh", act:(t,L)=>{
+      const p = easeOutCubic(t);
+      const mx = L.W*0.48;
+      const ux = lerp(L.W*1.18, L.W*0.72, p);
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      // unknown: use Wateen face but masked (we'll overlay mask)
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, faceTilt:-0.02});
+      drawMask(ux, L.baseY-190, 1.0, 0); // fully covering
+      if(t>0.12){
+        drawSpeech("شخص مجهول يظهر من العدم…", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+    }},
+
+    // 2) Mohsen: who are you?
+    { dur: 2.5, cue:null, act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      drawMask(ux, L.baseY-190, 1.0, 0);
+      if(t>0.08){
+        drawSpeech("محسن:\nمن أنتِ؟", L.W*0.06, L.H*0.12, Math.min(520,L.W*0.62), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+    }},
+
+    // 3) Unknown: just checking on you
+    { dur: 2.8, cue:"notif", act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      drawMask(ux, L.baseY-190, 1.0, 0);
+      if(t>0.10){
+        drawSpeech("المجهول:\nأريد فقط أن أطمّن عليك…", L.W*0.44, L.H*0.10, Math.min(560,L.W*0.52), Math.min(170,L.H*0.18), ux, L.H*0.64);
+      }
+    }},
+
+    // 4) Mohsen blocks
+    { dur: 3.0, cue:"pop", act:(t,L)=>{
+      const mx = L.W*0.48 + (t>0.2?Math.sin(t*20)*4:0);
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, armPose:1});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      drawMask(ux, L.baseY-190, 1.0, 0);
+
+      // block icon
+      const a = clamp((t-0.15)/0.25,0,1);
+      ctx.save();
+      ctx.translate(L.W*0.56, L.H*0.34);
+      ctx.rotate(-0.12);
+      ctx.globalAlpha = a;
+      ctx.strokeStyle="#111";
+      ctx.lineWidth=10;
+      ctx.beginPath(); ctx.arc(0,0,44,0,Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-32,32); ctx.lineTo(32,-32); ctx.stroke();
+      ctx.restore();
+
+      if(t>0.10){
+        drawSpeech("محسن:\nلا أتحدث مع الغرباء.\nوسأحظرك 🚫", L.W*0.06, L.H*0.10, Math.min(620,L.W*0.70), Math.min(190,L.H*0.20), mx, L.H*0.64);
+      }
+    }},
+
+    // 5) Mask reveal (it's Wateen)
+    { dur: 3.0, cue:"whoosh", act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      const openT = easeInOut(clamp((t-0.10)/0.70,0,1));
+      drawMask(ux, L.baseY-190, 1.0, openT);
+
+      if(t>0.30){
+        drawSpeech("وتين:\nتمهّل… أنا وتين.\nوأريد أن أعتذر…", L.W*0.44, L.H*0.08, Math.min(560,L.W*0.52), Math.min(210,L.H*0.23), ux, L.H*0.64);
+      }
+    }},
+
+    // 6) Mohsen refuses
+    { dur: 2.6, cue:null, act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("محسن:\nلا… لا أريدك.", L.W*0.06, L.H*0.12, Math.min(520,L.W*0.62), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+    }},
+
+    // 7) Wateen: I'll do anything
+    { dur: 3.0, cue:"chime", act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("وتين:\nسأفعل كل ما تريد…\nفقط سامحني.", L.W*0.44, L.H*0.10, Math.min(560,L.W*0.52), Math.min(190,L.H*0.20), ux, L.H*0.64);
+      }
+    }},
+
+    // 8) Broken heart
+    { dur: 2.8, cue:null, act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, faceTilt:0.03});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      // cracked heart
+      ctx.save();
+      ctx.translate(L.W*0.54, L.H*0.38);
+      ctx.rotate(-0.12);
+      ctx.strokeStyle="#111"; ctx.lineWidth=8; ctx.lineCap="round"; ctx.lineJoin="round";
+      ctx.beginPath();
+      ctx.moveTo(0,-20);
+      ctx.bezierCurveTo(40,-80, 120,-20, 0, 90);
+      ctx.bezierCurveTo(-120,-20,-40,-80, 0,-20);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0,-10);
+      ctx.lineTo(-10,20);
+      ctx.lineTo(10,45);
+      ctx.lineTo(-5,70);
+      ctx.stroke();
+      ctx.restore();
+
+      if(t>0.10){
+        drawSpeech("محسن:\nلكنّكِ كسرتِ قلبي…", L.W*0.06, L.H*0.12, Math.min(520,L.W*0.62), Math.min(160,L.H*0.17), mx, L.H*0.64);
+      }
+    }},
+
+    // 9) Wateen: I'll make it up
+    { dur: 2.6, cue:"sparkle", act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.72;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      drawSparkles(L.W*0.72, L.H*0.44, t, 6);
+      if(t>0.10){
+        drawSpeech("وتين:\nسأعوضك عن كل شيء.", L.W*0.44, L.H*0.12, Math.min(560,L.W*0.52), Math.min(150,L.H*0.16), ux, L.H*0.64);
+      }
+    }},
+
+    // 10) Mohsen forgives + stamp
+    { dur: 3.2, cue:"chime", act:(t,L)=>{
+      const p = easeInOut(t);
+      const mx = lerp(L.W*0.48, L.W*0.54, p);
+      const ux = lerp(L.W*0.72, L.W*0.66, p);
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, armPose:2});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, armPose:2});
+
+      if(t>0.10){
+        drawSpeech("محسن:\nحسنًا… سامحتك.\nلأنه لا يوجد مثلك بالدنيا.", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(190,L.H*0.20), mx, L.H*0.64);
+      }
+      if(t>0.55){
+        drawStamp("🤍 تسامح", L.W*0.50, L.H*0.24, Math.min(620, L.W*0.90));
+      }
+    }},
+
+    // 11) University worry
+    { dur: 3.0, cue:null, act:(t,L)=>{
+      const mx = L.W*0.52;
+      const ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, faceTilt:0.04});
+      if(t>0.10){
+        drawSpeech("وتين (تبكي):\nسوف أرسب في مادة بالجامعة…", L.W*0.44, L.H*0.10, Math.min(560,L.W*0.52), Math.min(180,L.H*0.19), ux, L.H*0.64);
+      }
+    }},
+
+    // 12) Mohsen reassurance
+    { dur: 3.2, cue:"sparkle", act:(t,L)=>{
+      const mx = L.W*0.52;
+      const ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      drawSparkles(mx, L.H*0.42, t, 6);
+      if(t>0.10){
+        drawSpeech("محسن:\nلا تقلقي… لن ترسبي أبدًا.\nأنتِ أذكى مخلوق شهدته.", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(210,L.H*0.23), mx, L.H*0.64);
+      }
+    }},
+
+    // 13) She says grades low
+    { dur: 2.6, cue:null, act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("وتين:\nلكن درجاتي منخفضة جدًا…", L.W*0.44, L.H*0.12, Math.min(560,L.W*0.52), Math.min(160,L.H*0.17), ux, L.H*0.64);
+      }
+    }},
+
+    // 14) Improvement always possible + success
+    { dur: 3.6, cue:"crowd", act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("محسن:\nلا بأس… هناك فرصة للتحسن دائمًا.\nوأنا واثق أنك ستنجحين.", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(210,L.H*0.23), mx, L.H*0.64);
+      }
+      if(t>0.55){
+        drawStamp("🎉 نجحت!", L.W*0.50, L.H*0.24, Math.min(520, L.W*0.86));
+      }
+    }},
+
+    // 15) Arabic lesson + voice call suggestion
+    { dur: 3.6, cue:null, act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("وتين:\nمحسن… أواجه صعوبة في فهم درس بالعربية.", L.W*0.44, L.H*0.08, Math.min(560,L.W*0.52), Math.min(190,L.H*0.20), ux, L.H*0.64);
+      }
+      if(t>0.45){
+        drawSpeech("محسن:\nما رأيك أشرح لك بمكالمة صوتية؟", L.W*0.06, L.H*0.14, Math.min(640,L.W*0.72), Math.min(170,L.H*0.18), mx, L.H*0.64);
+      }
+    }},
+
+    // 16) Ring ring + birds + drop
+    { dur: 4.0, cue:"ring", act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, faceTilt:-0.02});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      // little phone near Mohsen
+      const phW = Math.min(150, L.W*0.20);
+      const phH = phW*1.85;
+      drawPhone(L.W*0.34, L.H*0.52, phW, phH, null, 0.95);
+
+      // birds as tiny V strokes
+      ctx.strokeStyle="#111"; ctx.lineWidth=6; ctx.lineCap="round";
+      for(let i=0;i<5;i++){
+        const bx = L.W*0.62 + Math.sin(t*3+i)*60;
+        const by = L.H*0.26 + i*18;
+        ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx+14,by-10); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(bx+14,by-10); ctx.lineTo(bx+28,by); ctx.stroke();
+      }
+
+      if(t>0.12){
+        drawSpeech("ترن… ترررن…", L.W*0.06, L.H*0.08, Math.min(520,L.W*0.58), Math.min(120,L.H*0.14), mx, L.H*0.64);
+      }
+      if(t>0.35){
+        drawSpeech("محسن:\nألو… ألو…\nلا أسمع إلا صوت العصافير! 🐦", L.W*0.06, L.H*0.16, Math.min(680,L.W*0.90), Math.min(190,L.H*0.20), mx, L.H*0.64);
+      }
+
+      // call drop cue near end (once)
+      if(t>0.70 && t<0.76){ /* visual drop flash */
+        flash(0.22);
+      }
+    }},
+
+    // 17) Wateen apologizes: you scare me
+    { dur: 3.4, cue:"drop", act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, faceTilt:0.04});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, faceTilt:0.03});
+      if(t>0.10){
+        drawSpeech("وتين:\nاعتذر…\nلكن أنت تقلقني… وأنا أخاف.", L.W*0.44, L.H*0.08, Math.min(560,L.W*0.52), Math.min(210,L.H*0.23), ux, L.H*0.64);
+      }
+      if(t>0.45){
+        drawSpeech("محسن (حزين):\nهل أنا… مخيف؟", L.W*0.06, L.H*0.18, Math.min(520,L.W*0.58), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+    }},
+
+    // 18) Ramadan plan + Spain
+    { dur: 3.6, cue:"chime", act:(t,L)=>{
+      const mx = L.W*0.52, ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen});
+      if(t>0.10){
+        drawSpeech("محسن:\nرمضان اقترب…\nنسوي جدول جميل لنا.\nوبعد رمضان بسافر إسبانيا 🇪🇸", L.W*0.06, L.H*0.08, Math.min(720,L.W*0.92), Math.min(230,L.H*0.25), mx, L.H*0.64);
+      }
+      if(t>0.55){
+        drawSpeech("وتين:\nيا لك من محظوظ!\nورمضان بيكون رائع 🌙", L.W*0.44, L.H*0.16, Math.min(560,L.W*0.52), Math.min(180,L.H*0.19), ux, L.H*0.64);
+      }
+    }},
+
+    // 19) Cute “surprise” on phone (safe)
+    { dur: 4.0, cue:"pop", act:(t,L)=>{
+      const mx = L.W*0.52;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, faceTilt:-0.02});
+
+      const phW = Math.min(180, L.W*0.24);
+      const phH = phW*1.85;
+
+      const popT = easeOutCubic(clamp((t-0.15)/0.35,0,1));
+      const px = lerp(L.W*0.36, L.W*0.42, popT);
+      const py = lerp(L.H*0.74, L.H*0.46, popT);
+
+      if(t>0.15){
+        drawPhone(px, py, phW, phH, imgWateen, 0.86+0.14*popT);
+        drawSparkles(px + phW*0.55, py + phH*0.35, t, 6);
+      }
+
+      if(t>0.10){
+        drawSpeech("محسن:\nممكن أشوف جدة والقصيم؟ ", L.W*0.06, L.H*0.08, Math.min(520,L.W*0.58), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+      if(t>0.40){
+        drawSpeech("وتين:\nحسنًا… انظر ✨", L.W*0.44, L.H*0.14, Math.min(520,L.W*0.52), Math.min(150,L.H*0.16), L.W*0.74, L.H*0.64);
+      }
+      if(t>0.55){
+        drawSpeech("محسن:\nواااو! ما شاء الله 😳✨", L.W*0.06, L.H*0.18, Math.min(640,L.W*0.72), Math.min(150,L.H*0.16), mx, L.H*0.64);
+      }
+    }},
+
+    // 20) Spain travel montage
+    { dur: 3.8, cue:"airport", act:(t,L)=>{
+      // simple “walking with headphones” vibe + whoosh flash
+      const p = easeInOut(t);
+      const mx = lerp(L.W*0.30, L.W*0.70, p);
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, legPhase:t*10});
+      // headphones arcs
+      ctx.strokeStyle="#111"; ctx.lineWidth=8;
+      ctx.beginPath(); ctx.arc(mx, L.baseY-190, 74, Math.PI*1.08, Math.PI*1.92); ctx.stroke();
+      ctx.beginPath(); ctx.arc(mx-52, L.baseY-190, 16, 0, Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(mx+52, L.baseY-190, 16, 0, Math.PI*2); ctx.stroke();
+
+      if(t>0.12){
+        drawSpeech("مشهد السفر…\nمحسن يتجول في إسبانيا\nويتحدث مع وتين بسعادة 🇪🇸🎧", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(190,L.H*0.20), mx, L.H*0.64);
+      }
+      if(t>0.25 && t<0.30) flash(0.18);
+    }},
+
+    // 21) Past Lives + promise
+    { dur: 4.0, cue:"cinema", act:(t,L)=>{
+      const mx = L.W*0.48;
+      const ux = L.W*0.70;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, armPose:2});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, armPose:2});
+      drawCinemaIcon(L.W*0.50, L.H*0.44, t);
+
+      if(t>0.10){
+        drawSpeech("مشهد فيلم Past Lives (2023)…\nوعد بالزواج 🤝💍", L.W*0.06, L.H*0.08, Math.min(680,L.W*0.90), Math.min(170,L.H*0.18), L.W*0.58, L.H*0.64);
+      }
+      if(t>0.55){
+        drawStamp("❤️ الحب يعود من جديد", L.W*0.50, L.H*0.24, Math.min(680, L.W*0.92));
+      }
+    }},
+
+    // 22) End chapter 2
+    { dur: 3.2, cue:"chime", act:(t,L)=>{
+      const mx = L.W*0.54;
+      const ux = L.W*0.66;
+      drawStickman({x: mx, y: L.baseY, scale:1.0, faceImg:imgMohsen, armPose:2});
+      drawStickman({x: ux, y: L.baseY, scale:1.0, faceImg:imgWateen, armPose:2});
+      drawSparkles(L.W*0.60, L.H*0.40, t, 8);
+      if(t>0.10){
+        drawSpeech("نهاية الفصل الثاني…\nمحسن ووتين في قمة السعادة والحب ✨", L.W*0.06, L.H*0.10, Math.min(680,L.W*0.90), Math.min(170,L.H*0.18), L.W*0.60, L.H*0.64);
+      }
+      if(t>0.62){
+        drawStamp("⏳ الفصل 3 قريبًا", L.W*0.50, L.H*0.26, Math.min(680, L.W*0.92));
+      }
+    }},
+  ];
+
+  // ---------- Playback engine ----------
+  let state = "idle"; // idle | playing | ended
+  let startTime = 0;
+  let segIndex = -1;
+
+  function totalDuration(){ return story.reduce((s,x)=>s+x.dur,0); }
+  function setReplayVisible(v){ replayWrap.classList.toggle("show", !!v); }
+  function reset(){ state="idle"; setReplayVisible(false); segIndex=-1; }
+  function start(){ state="playing"; setReplayVisible(false); startTime=performance.now(); segIndex=-1; }
+  function end(){ state="ended"; setReplayVisible(true); }
+
+  function render(now){
+    const L = layout();
+    clear();
+    drawFloor();
+
+    if(state==="idle"){
+      story[0].act(0, L);
+      requestAnimationFrame(render);
+      return;
+    }
+    if(state==="ended"){
+      story[story.length-1].act(1, L);
+      requestAnimationFrame(render);
+      return;
+    }
+
+    const elapsed = (now - startTime)/1000;
+    const total = totalDuration();
+    if(elapsed >= total){
+      end();
+      requestAnimationFrame(render);
+      return;
+    }
+
+    let acc=0, idx=0;
+    for(let i=0;i<story.length;i++){
+      const d = story[i].dur;
+      if(elapsed < acc + d){ idx=i; break; }
+      acc += d; idx=i;
+    }
+
+    // cue on segment enter
+    if(idx !== segIndex){
+      segIndex = idx;
+      const cue = story[idx].cue;
+      if(cue) sfx(cue);
+
+      // quick micro-flash on hard cuts (feel more “video”)
+      // (small and subtle)
+      if(idx !== 0) flash(0.12);
+    }
+
+    const local = clamp((elapsed - acc)/story[idx].dur, 0, 1);
+
+    // Simple “camera” zoom on a few key segments for professionalism
+    const zoomSegments = new Set([5,10,19,21]); // reveal, forgiveness, phone surprise, cinema promise
+    if(zoomSegments.has(idx)){
+      const z = 1 + 0.05*easeInOut(clamp((local-0.15)/0.70,0,1));
+      ctx.save();
+      ctx.translate(L.W*0.5, L.H*0.46);
+      ctx.scale(z,z);
+      ctx.translate(-L.W*0.5, -L.H*0.46);
+      story[idx].act(local, L);
+      ctx.restore();
+    } else {
+      story[idx].act(local, L);
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  btnReplay.addEventListener('click', ()=>{
+    unlockAudio();
+    reset(); start();
+  });
+  replayWrap.addEventListener('click', (e)=>{
+    if(e.target === replayWrap){
+      unlockAudio();
+      reset(); start();
+    }
+  });
+
+  // Autoplay after 2 seconds
+  reset();
+  requestAnimationFrame(render);
+  setTimeout(()=> start(), 2000);
+
+})();
+</script>
+</body>
+</html>
